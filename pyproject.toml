@@ -1,0 +1,11 @@
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+# 与 ruff 默认规则保持一致，另加 import 排序
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+# 测试里先 importorskip 再导入被测模块，import 位置由跳过逻辑决定
+"tests/*" = ["E402"]

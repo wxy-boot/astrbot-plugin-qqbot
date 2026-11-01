@@ -205,3 +205,17 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# ---- AstrBot 插件 astrbot_plugin_sub2api_qqbot ----
+# 运行时生成的绑定关系，包含 QQ 号与邮箱，禁止提交
+state.json
+state.json.tmp
+state.json.corrupt-*
+
+# 本地开发环境
+.venv/
+.idea/
+.pytest_cache/
+
+# 在仓库根目录导入 AstrBot 时会生成的运行时目录
+/data/
