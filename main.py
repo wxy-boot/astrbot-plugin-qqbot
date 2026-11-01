@@ -33,10 +33,16 @@ except ImportError:  # pragma: no cover - 在插件目录内直接 import main �
 PLUGIN_NAME = "astrbot_plugin_sub2api_qqbot"
 PLUGIN_AUTHOR = "wxy-boot"
 PLUGIN_DESC = "Sub2API 账号绑定、每日签到、消费达标抽奖与状态查询。"
-PLUGIN_VERSION = "v0.1.0"
+PLUGIN_VERSION = "v0.1.1"
 PLUGIN_REPO = "https://github.com/wxy-boot/astrbot-plugin-qqbot"
 
 PLATFORM_NAME = "aiocqhttp"
+"""OneBot v11 / NapCat 的平台 ID（仅作参考常量，不再用于过滤消息）。
+
+早期版本写死只处理这个平台，导致 QQ 官方机器人（``qq_official``）上
+所有命令被静默丢弃、只剩大模型在回话。现在平台由 ``platform_whitelist``
+决定，留空表示全平台放行。
+"""
 
 CMD_BIND = ("绑定", "bind")
 CMD_CHECKIN = ("签到", "checkin", "打卡")
@@ -87,12 +93,22 @@ class Sub2ApiQqBotPlugin(Star):
         self.cooldown = qbot_ratelimit.CommandCooldown(
             self.config.command_cooldown_seconds
         )
+        self._group_whitelist = {
+            qbot_config.normalize_id(item) for item in self.config.allowed_group_ids
+        }
+        self._skip_logged: set[str] = set()
 
     # ------------------------------------------------------------ 生命周期钩子
 
     async def initialize(self) -> None:
         """载入绑定关系并提示配置状态。"""
         await self.store.load()
+        logger.info(
+            "Sub2API QQ 助手：平台限制=%s；群白名单=%s；冷却=%ss",
+            self.config.platform_policy_text,
+            self.config.group_policy_text,
+            self.config.command_cooldown_seconds,
+        )
         if self.store.read_only:
             logger.error(
                 "Sub2API QQ 助手：绑定数据处于只读保护状态（%s），"
@@ -119,7 +135,7 @@ class Sub2ApiQqBotPlugin(Star):
     @filter.command("绑定", alias={"bind"})
     async def cmd_bind(self, event: AstrMessageEvent):
         """绑定 Sub2API 账号：/绑定 注册邮箱"""
-        if not self._should_handle(event):
+        if not self._should_handle(event, "绑定"):
             return
         wait = self._cooldown_wait(event)
         if wait:
@@ -138,7 +154,7 @@ class Sub2ApiQqBotPlugin(Star):
     @filter.command("签到", alias={"checkin", "打卡"})
     async def cmd_checkin(self, event: AstrMessageEvent):
         """每日签到：/签到"""
-        if not self._should_handle(event):
+        if not self._should_handle(event, "签到"):
             return
         wait = self._cooldown_wait(event)
         if wait:
@@ -153,7 +169,7 @@ class Sub2ApiQqBotPlugin(Star):
     @filter.command("抽奖", alias={"draw", "转盘"})
     async def cmd_draw(self, event: AstrMessageEvent):
         """每日抽奖：/抽奖"""
-        if not self._should_handle(event):
+        if not self._should_handle(event, "抽奖"):
             return
         wait = self._cooldown_wait(event)
         if wait:
@@ -168,7 +184,7 @@ class Sub2ApiQqBotPlugin(Star):
     @filter.command("查询", alias={"status", "我的"})
     async def cmd_status(self, event: AstrMessageEvent):
         """查看余额与今日状态：/查询"""
-        if not self._should_handle(event):
+        if not self._should_handle(event, "查询"):
             return
         wait = self._cooldown_wait(event)
         if wait:
@@ -184,7 +200,7 @@ class Sub2ApiQqBotPlugin(Star):
     @filter.command("解绑", alias={"unbind"})
     async def cmd_unbind(self, event: AstrMessageEvent):
         """解除当前 QQ 的绑定：/解绑"""
-        if not self._should_handle(event):
+        if not self._should_handle(event, "解绑"):
             return
         wait = self._cooldown_wait(event)
         if wait:
@@ -200,7 +216,7 @@ class Sub2ApiQqBotPlugin(Star):
     @filter.command("帮助", alias={"help"})
     async def cmd_help(self, event: AstrMessageEvent):
         """显示命令说明：/帮助"""
-        if not self._should_handle(event):
+        if not self._should_handle(event, "帮助"):
             return
         # /帮助 不受冷却限制，也不访问上游
         yield event.plain_result(self.service.help_text())
@@ -208,13 +224,20 @@ class Sub2ApiQqBotPlugin(Star):
 
     # ---------------------------------------------------------------- 过滤逻辑
 
-    def _should_handle(self, event: AstrMessageEvent) -> bool:
-        """平台过滤、忽略自己、群白名单。"""
-        try:
-            if event.get_platform_name() != PLATFORM_NAME:
-                return False
-        except Exception:
-            logger.exception("Sub2API QQ 助手：读取平台名称失败")
+    def _should_handle(self, event: AstrMessageEvent, command: str = "") -> bool:
+        """平台过滤、忽略自己、群白名单。
+
+        任何一项不通过都**不会**回复用户（避免在别人的群里刷屏），但会打一条
+        去重后的 warning，便于在 AstrBot 日志里定位“机器人为什么不说话”。
+        """
+        platform = self._platform_name(event)
+        if not self._platform_allowed(platform):
+            self._log_skip(
+                f"platform:{platform}",
+                "已忽略平台的命令：platform=%r 不在 platform_whitelist 内（当前限制：%s）",
+                platform,
+                self.config.platform_policy_text,
+            )
             return False
 
         sender = self._sender_id(event)
@@ -226,23 +249,64 @@ class Sub2ApiQqBotPlugin(Star):
             logger.debug("Sub2API QQ 助手：读取机器人自身 QQ 失败", exc_info=True)
         if sender and self_id and sender == self_id:
             return False
-        return self._allowed_group(event)
+
+        if not self._allowed_group(event):
+            return False
+
+        if command:
+            logger.info(
+                "收到命令 /%s：platform=%s group=%s",
+                command,
+                platform or "<unknown>",
+                self._group_raw(event) or "<private>",
+            )
+        return True
+
+    def _platform_name(self, event: AstrMessageEvent) -> str:
+        try:
+            return str(event.get_platform_name() or "").strip().lower()
+        except Exception:
+            logger.exception("Sub2API QQ 助手：读取平台名称失败")
+            return ""
+
+    def _platform_allowed(self, platform: str) -> bool:
+        """平台白名单：留空表示不限制（兼容 NapCat 与 QQ 官方机器人）。"""
+        allowed = self.config.platform_whitelist
+        if not allowed:
+            return True
+        return platform in allowed
 
     def _allowed_group(self, event: AstrMessageEvent) -> bool:
-        whitelist = self.config.allowed_group_ids
-        if not whitelist:
-            return True
-        try:
-            raw = str(event.get_group_id() or "").strip()
-        except Exception:
-            return False
+        raw = self._group_raw(event)
         if not raw:  # 私聊放行
             return True
+        if not self._group_whitelist:  # 未配置白名单：所有群放行
+            return True
+        key = qbot_config.normalize_id(raw)
+        if key in self._group_whitelist:
+            return True
+        self._log_skip(
+            f"group:{key}",
+            "已忽略群 %r 的命令：不在 allowed_group_ids 内（当前白名单：%s）",
+            raw,
+            self.config.group_policy_text,
+        )
+        return False
+
+    @staticmethod
+    def _group_raw(event: AstrMessageEvent) -> str:
         try:
-            return int(raw) in whitelist
-        except ValueError:
-            logger.warning("Sub2API QQ 助手：无法解析群号 %r，按不在白名单处理", raw)
-            return False
+            return str(event.get_group_id() or "").strip()
+        except Exception:
+            logger.debug("Sub2API QQ 助手：读取群号失败", exc_info=True)
+            return ""
+
+    def _log_skip(self, key: str, template: str, *args: Any) -> None:
+        """同一个原因只告警一次，避免被刷屏。"""
+        if key in self._skip_logged:
+            return
+        self._skip_logged.add(key)
+        logger.warning(template, *args)
 
     def _cooldown_wait(self, event: AstrMessageEvent) -> int:
         return self.cooldown.check(self._sender_id(event))

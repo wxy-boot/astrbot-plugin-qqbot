@@ -62,7 +62,7 @@
 | 项 | 要求 |
 | --- | --- |
 | AstrBot | v4.x（开发验证于 v4.14 源码与 docstring 约定，部署建议 v4.28+） |
-| 消息平台 | OneBot v11 / NapCat（`aiocqhttp`） |
+| 消息平台 | OneBot v11 / NapCat（`aiocqhttp`）或 QQ 官方机器人（`qq_official`）——插件只收发纯文本，默认不限制平台 |
 | 依赖服务 | Sub2API、`sub2api-qiandao`、`sub2api-choujiang` |
 | Python | 3.10+（插件无第三方依赖，`aiohttp` 由 AstrBot 提供） |
 
@@ -106,7 +106,8 @@ docker logs --since 3m astrbot | grep -E "astrbot_plugin_sub2api_qqbot|Sub2API|T
 | `choujiang_bot_secret` | string | 空 | 抽奖服务单独密钥；留空用 `bot_shared_secret` |
 | `request_timeout_seconds` | int | `30` | 单次上游请求总超时（5–120） |
 | `command_cooldown_seconds` | int | `2` | 同一 QQ 命令冷却（0–60） |
-| `allowed_group_ids` | string | 空 | 允许使用的群号，逗号分隔；空表示所有群 |
+| `platform_whitelist` | string | 空 | 允许响应的平台 ID，逗号分隔；**留空＝不限制**。NapCat 为 `aiocqhttp`，QQ 官方机器人为 `qq_official` |
+| `allowed_group_ids` | string | 空 | 允许使用的群号（数字群号或官方机器人的 `group_openid`），逗号分隔；空表示所有群 |
 | `currency_unit` | string | `USD` | 余额展示单位；签到/抽奖优先用服务返回值 |
 | `mask_email_in_group` | bool | `true` | 群聊中隐藏邮箱中间部分 |
 
@@ -120,12 +121,15 @@ docker logs --since 3m astrbot | grep -E "astrbot_plugin_sub2api_qqbot|Sub2API|T
   "qiandao_base_url": "http://sub2api-qiandao:8787/checkin",
   "choujiang_base_url": "http://sub2api-choujiang:8788/choujiang",
   "bot_shared_secret": "******",
+  "platform_whitelist": "",
   "allowed_group_ids": ""
 }
 ```
 
 说明：
 
+- `platform_whitelist` 留空时任何平台都能触发命令（NapCat 与 QQ 官方机器人开箱可用）；
+  若这个 AstrBot 同时还接了 Telegram 等平台，填 `aiocqhttp,qq_official` 即可收窄范围。
 - 插件配置里**没有**「消费门槛金额」：门槛只在两个服务各自的后台设置。
 - `sub2api_admin_email` 必须是 `admin` 角色的**专用账号**，否则 `/admin/users` 会返回 403；不要用主管理员。
 - 配置不合法（URL 不是 http(s)、超时越界、密钥短于 16 位等）时插件会加载失败并在日志中给出明确原因；
@@ -203,7 +207,8 @@ curl -s -X POST http://127.0.0.1:8787/checkin/api/bot/checkin \
 
 | 现象 | 排查方向 |
 | --- | --- |
-| `/帮助` 没反应 | AstrBot 唤醒前缀是否包含 `/`；插件是否加载成功；平台是否为 `aiocqhttp`；群号是否在 `allowed_group_ids` 白名单内 |
+| `/帮助` 没反应 | 见下方「机器人不回复命令」；插件未加载或被停用时任何指令都不会有反应 |
+| 机器人只回大模型的话（一段 AI 回答），不回插件文案 | 说明消息没被插件的指令过滤器接住：`/帮助` 看 AstrBot 日志里的 `收到命令 /帮助`；没有这行就按下一节逐项排查 |
 | `/绑定` 提示未找到账号 | 邮箱是否与 Sub2API 注册邮箱完全一致；账号是否被删除 |
 | `/绑定` 提示管理员凭据未配置 | 填写 `sub2api_admin_email` / `sub2api_admin_password` |
 | `/绑定` 提示站点管理员尚未完成合规确认 | 用管理员登录 Sub2API 面板完成合规确认（HTTP 423） |
@@ -213,6 +218,29 @@ curl -s -X POST http://127.0.0.1:8787/checkin/api/bot/checkin \
 | `/查询` 某行显示「查询失败」 | 对应服务地址/网络不可达，或该服务关闭了机器人接口；其他行不受影响 |
 | 提示操作太频繁 | `command_cooldown_seconds` 冷却中，稍后重试 |
 | 写完请求超时/断网 | 结果未知，先用 `/查询` 确认，**不要**重复发送（避免重复加余额） |
+
+### 机器人不回复命令（只回大模型 / 完全不回）
+
+AstrBot 的分发顺序是：**插件指令 → 大模型**。所以“机器人回了一段 AI 文案”＝指令没被接住，
+而不是模型/网络的问题。按下面顺序看日志即可定位：
+
+```bash
+# 1) 插件加载与配置策略（应能看到「已就绪」「平台限制=…；群白名单=…」）
+docker logs --since 10m astrbot | grep -E "Sub2API QQ 助手|astrbot_plugin_sub2api_qqbot"
+
+# 2) 发一条 /帮助 后，看插件有没有收到事件
+docker logs --since 2m astrbot | grep -E "收到命令|已忽略|Traceback"
+```
+
+| 日志/现象 | 结论与处理 |
+| --- | --- |
+| 连「已就绪」都没有 | 插件没加载：目录名需为 `astrbot_plugin_sub2api_qqbot`；WebUI 插件页是否显示「已启用」；看有无 `Traceback` |
+| `已忽略平台的命令：platform='…'` | 平台被 `platform_whitelist` 挡住，按日志里的值改配置或留空 |
+| `已忽略群 '…' 的命令` | 群号不在 `allowed_group_ids`：注意官方机器人的群号是 `group_openid`（形如 `A1B2…`），不是数字群号 |
+| 有「已就绪」但没有「收到命令」 | 平台适配器没把消息给插件：确认 NapCat 反向 WS 已连接，或官方机器人已在群里被 @ |
+
+补充：**@机器人后可以不带 `/`**（AstrBot 会把第一个 @机器人 从消息里去掉，`@二狗 帮助` 等价 `/帮助`）；
+但手打的 `@二狗` 只是普通文字时不会被识别，请用真正的提及，或直接发 `/帮助`。
 
 ---
 

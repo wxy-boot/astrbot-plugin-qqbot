@@ -117,26 +117,53 @@ def test_admin_credentials_flag() -> None:
 
 
 def test_parse_group_ids_supports_chinese_comma() -> None:
-    ids, invalid = parse_group_ids("123456，789012, 345678")
-    assert ids == frozenset({123456, 789012, 345678})
-    assert invalid == []
+    assert parse_group_ids("123456，789012, 345678") == frozenset(
+        {"123456", "789012", "345678"}
+    )
 
 
-def test_parse_group_ids_ignores_invalid_items() -> None:
-    ids, invalid = parse_group_ids("123456,abc,-5,0,789012")
-    assert ids == frozenset({123456, 789012})
-    assert invalid == ["abc", "-5", "0"]
+def test_parse_group_ids_accepts_openid_groups() -> None:
+    """QQ 官方机器人的 group_openid 不是数字，不能被丢掉。"""
+    assert parse_group_ids("A1B2C3D4E5F6, 123456") == frozenset(
+        {"a1b2c3d4e5f6", "123456"}
+    )
+
+
+def test_parse_group_ids_drops_non_positive_numbers() -> None:
+    assert parse_group_ids("123456,-5,0,789012") == frozenset({"123456", "789012"})
 
 
 def test_parse_group_ids_empty() -> None:
-    assert parse_group_ids("") == (frozenset(), [])
-    assert parse_group_ids("   ") == (frozenset(), [])
-    assert parse_group_ids(None) == (frozenset(), [])
+    assert parse_group_ids("") == frozenset()
+    assert parse_group_ids("   ") == frozenset()
+    assert parse_group_ids(None) == frozenset()
+
+
+def test_parse_group_ids_normalizes_leading_zeros() -> None:
+    assert parse_group_ids("0123") == frozenset({"123"})
 
 
 def test_allowed_group_ids_config() -> None:
     config = PluginConfig.from_mapping({"allowed_group_ids": "100,200"})
-    assert config.allowed_group_ids == frozenset({100, 200})
+    assert config.allowed_group_ids == frozenset({"100", "200"})
+
+
+def test_platform_whitelist_defaults_to_unrestricted() -> None:
+    """默认不限制平台：NapCat(aiocqhttp) 与 QQ 官方机器人(qq_official) 都能用。"""
+    config = PluginConfig.from_mapping({})
+    assert config.platform_whitelist == frozenset()
+    assert config.platform_policy_text == "不限制（任意平台）"
+
+
+def test_platform_whitelist_parsed_and_normalized() -> None:
+    config = PluginConfig.from_mapping({"platform_whitelist": " Aiocqhttp，QQ_Official "})
+    assert config.platform_whitelist == frozenset({"aiocqhttp", "qq_official"})
+
+
+def test_group_policy_text() -> None:
+    assert PluginConfig.from_mapping({}).group_policy_text.startswith("不限制")
+    config = PluginConfig.from_mapping({"allowed_group_ids": "200,100"})
+    assert config.group_policy_text == "100, 200"
 
 
 def test_currency_unit_fallback() -> None:

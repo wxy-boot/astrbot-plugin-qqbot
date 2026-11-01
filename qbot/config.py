@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 from urllib.parse import urlsplit
@@ -22,6 +23,7 @@ MIN_COOLDOWN, MAX_COOLDOWN = 0, 60
 
 _TRUE_VALUES = {"true", "1", "yes", "on"}
 _FALSE_VALUES = {"false", "0", "no", "off"}
+_NUMBER = re.compile(r"[+-]?\d+")
 
 
 @dataclass(frozen=True)
@@ -39,7 +41,8 @@ class PluginConfig:
     choujiang_bot_secret: str = ""
     request_timeout_seconds: int = 30
     command_cooldown_seconds: int = 2
-    allowed_group_ids: frozenset[int] = field(default_factory=frozenset)
+    platform_whitelist: frozenset[str] = field(default_factory=frozenset)
+    allowed_group_ids: frozenset[str] = field(default_factory=frozenset)
     currency_unit: str = "USD"
     mask_email_in_group: bool = True
 
@@ -63,6 +66,20 @@ class PluginConfig:
     def request_timeout(self) -> float:
         return float(self.request_timeout_seconds)
 
+    @property
+    def platform_policy_text(self) -> str:
+        """日志里展示的平台策略。"""
+        if not self.platform_whitelist:
+            return "不限制（任意平台）"
+        return ", ".join(sorted(self.platform_whitelist))
+
+    @property
+    def group_policy_text(self) -> str:
+        """日志里展示的群白名单策略。"""
+        if not self.allowed_group_ids:
+            return "不限制（任意群 + 私聊）"
+        return ", ".join(sorted(self.allowed_group_ids))
+
     # ---------------------------------------------------------------- 构造入口
 
     @classmethod
@@ -73,12 +90,9 @@ class PluginConfig:
             ValueError: 任一配置项不合法。
         """
         raw: Mapping[str, Any] = data or {}
-        group_ids, invalid_ids = parse_group_ids(raw.get("allowed_group_ids"))
-        if invalid_ids:
-            logger.warning(
-                "allowed_group_ids 中以下项目不是合法群号，已忽略：%s",
-                ", ".join(invalid_ids),
-            )
+        group_ids = parse_group_ids(raw.get("allowed_group_ids"))
+        if group_ids:
+            logger.info("allowed_group_ids 已启用群白名单：%s", ", ".join(sorted(group_ids)))
 
         config = cls(
             sub2api_base_url=_url(raw, "sub2api_base_url", DEFAULT_SUB2API_BASE_URL),
@@ -98,6 +112,7 @@ class PluginConfig:
             command_cooldown_seconds=_int(
                 raw, "command_cooldown_seconds", 2, MIN_COOLDOWN, MAX_COOLDOWN
             ),
+            platform_whitelist=parse_platforms(raw.get("platform_whitelist")),
             allowed_group_ids=group_ids,
             currency_unit=_currency(raw, "currency_unit", "USD"),
             mask_email_in_group=_bool(raw, "mask_email_in_group", True),
@@ -108,40 +123,75 @@ class PluginConfig:
 # --------------------------------------------------------------------- 解析工具
 
 
-def parse_group_ids(value: Any) -> tuple[frozenset[int], list[str]]:
+def normalize_id(value: Any) -> str:
+    """把群号/平台名归一化成可比较的字符串。
+
+    数字群号去掉前导零；OpenID 形式的群号（QQ 官方机器人 ``group_openid``）
+    原样保留并统一小写，避免因为 ``int()`` 解析失败而被静默丢弃。
+    """
+    text = str(value or "").strip().lower()
+    if text.isdigit():
+        return text.lstrip("0") or "0"
+    return text
+
+
+def _split_tokens(value: Any) -> list[str]:
+    """把逗号（中英文）、顿号、换行、空白分隔的配置项拆成列表。"""
+    if value is None:
+        return []
+    if isinstance(value, bool):
+        return []
+    if isinstance(value, int | float):
+        return [str(int(value))]
+    if isinstance(value, set | frozenset | list | tuple):
+        return [str(item) for item in value]
+    text = (
+        str(value)
+        .replace("，", ",")
+        .replace("、", ",")
+        .replace(";", ",")
+        .replace("\n", ",")
+        .replace(" ", ",")
+        .replace("\t", ",")
+    )
+    return text.split(",")
+
+
+def parse_group_ids(value: Any) -> frozenset[str]:
     """解析群号白名单。
 
-    支持英文/中文逗号、空白分隔。非法项会被忽略并返回，交由调用方告警。
-
-    Returns:
-        (合法群号集合, 非法原始项列表)
+    支持数字群号（OneBot/NapCat）与 OpenID 形式的群号（QQ 官方机器人
+    ``group_openid``）。空项与纯空白会被忽略；``0``、``-5`` 这类数字会被丢弃并告警。
     """
-    if value is None:
-        return frozenset(), []
-    if isinstance(value, int | float):
-        items = [str(int(value))]
-    elif isinstance(value, set | frozenset | list | tuple):
-        items = [str(item) for item in value]
-    else:
-        text = str(value).replace("，", ",").replace("、", ",")
-        items = text.replace("\n", ",").replace(" ", ",").split(",")
-
-    valid: set[int] = set()
-    invalid: list[str] = []
-    for item in items:
-        token = str(item).strip()
+    valid: set[str] = set()
+    ignored: list[str] = []
+    for item in _split_tokens(value):
+        token = normalize_id(item)
         if not token:
             continue
-        try:
-            number = int(token)
-        except ValueError:
-            invalid.append(token)
+        if _NUMBER.fullmatch(token) and int(token) <= 0:
+            ignored.append(token)
             continue
-        if number <= 0:
-            invalid.append(token)
-            continue
-        valid.add(number)
-    return frozenset(valid), invalid
+        valid.add(token)
+    if ignored:
+        logger.warning(
+            "allowed_group_ids 中以下项目不是合法群号，已忽略：%s", ", ".join(ignored)
+        )
+    return frozenset(valid)
+
+
+def parse_platforms(value: Any) -> frozenset[str]:
+    """解析平台白名单（``aiocqhttp`` / ``qq_official`` 等）。
+
+    留空表示不限制平台：AstrBot 的事件里，平台 ID 是 ``aiocqhttp``（OneBot v11 /
+    NapCat）或 ``qq_official``（QQ 官方机器人），两者都能正常收发纯文本命令。
+    """
+    valid = {
+        token
+        for token in (str(item).strip().lower() for item in _split_tokens(value))
+        if token
+    }
+    return frozenset(valid)
 
 
 def _text(raw: Mapping[str, Any], key: str, default: str) -> str:
@@ -232,6 +282,8 @@ __all__ = [
     "DEFAULT_CHECKIN_BASE_URL",
     "DEFAULT_SUB2API_BASE_URL",
     "PluginConfig",
+    "normalize_id",
     "parse_group_ids",
+    "parse_platforms",
 ]
 

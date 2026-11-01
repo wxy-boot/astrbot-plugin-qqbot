@@ -119,7 +119,7 @@ def test_handlers_are_registered_with_aliases() -> None:
 
 def test_plugin_metadata() -> None:
     assert main.PLUGIN_NAME == "astrbot_plugin_sub2api_qqbot"
-    assert main.PLUGIN_VERSION == "v0.1.0"
+    assert main.PLUGIN_VERSION == "v0.1.1"
 
 
 # ---------------------------------------------------------------- /帮助
@@ -148,13 +148,37 @@ async def test_help_works_even_when_state_is_corrupt(tmp_path: Path) -> None:
 # ---------------------------------------------------------------- 过滤逻辑
 
 
-async def test_other_platform_is_ignored(tmp_path: Path) -> None:
+async def test_qq_official_platform_is_supported_by_default(tmp_path: Path) -> None:
+    """QQ 官方机器人（qq_official）默认也能触发命令。
+
+    之前这里写死 ``aiocqhttp``，官方机器人上所有命令都被静默丢弃，
+    用户只会看到大模型（或没有任何回复）。
+    """
     plugin = make_plugin(tmp_path)
+    event = FakeEvent("帮助", platform="qq_official", group="A1B2C3D4E5F6")
+
+    results = await collect(plugin.cmd_help(event))
+    assert results[0].text == fmt.MSG_HELP
+    assert event.stopped is True
+
+
+async def test_other_platform_is_ignored_when_whitelisted(tmp_path: Path) -> None:
+    plugin = make_plugin(tmp_path, platform_whitelist="aiocqhttp")
     event = FakeEvent("帮助", platform="telegram")
 
     results = await collect(plugin.cmd_help(event))
     assert results == []
     assert event.stopped is False
+
+
+async def test_platform_whitelist_accepts_configured_platform(tmp_path: Path) -> None:
+    plugin = make_plugin(tmp_path, platform_whitelist="aiocqhttp,qq_official")
+
+    official = FakeEvent("帮助", platform="qq_official")
+    assert await collect(plugin.cmd_help(official)) != []
+
+    telegram = FakeEvent("帮助", platform="telegram")
+    assert await collect(plugin.cmd_help(telegram)) == []
 
 
 async def test_self_message_is_ignored(tmp_path: Path) -> None:
@@ -177,6 +201,23 @@ async def test_group_whitelist_filters_groups(tmp_path: Path) -> None:
 
     private = FakeEvent("帮助")
     assert await collect(plugin.cmd_help(private)) != []
+
+
+async def test_group_whitelist_supports_openid_groups(tmp_path: Path) -> None:
+    """官方机器人的群号是 group_openid，不能因为不是数字就被过滤。"""
+    plugin = make_plugin(tmp_path, allowed_group_ids="a1b2c3d4e5f6")
+
+    allowed = FakeEvent("帮助", group="A1B2C3D4E5F6", platform="qq_official")
+    assert await collect(plugin.cmd_help(allowed)) != []
+
+    blocked = FakeEvent("帮助", group="ffffffffffff", platform="qq_official")
+    assert await collect(plugin.cmd_help(blocked)) == []
+
+
+async def test_group_whitelist_ignores_leading_zeros(tmp_path: Path) -> None:
+    plugin = make_plugin(tmp_path, allowed_group_ids="123456")
+    event = FakeEvent("帮助", group="0123456")
+    assert await collect(plugin.cmd_help(event)) != []
 
 
 async def test_empty_whitelist_allows_every_group(tmp_path: Path) -> None:

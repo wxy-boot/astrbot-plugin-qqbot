@@ -55,7 +55,12 @@
     "default": 2
   },
   "allowed_group_ids": {
-    "description": "允许使用的群号，逗号分隔；留空表示所有群",
+    "description": "允许使用的群号（OneBot 数字群号或 QQ 官方机器人的 group_openid），逗号分隔；留空表示所有群",
+    "type": "string",
+    "default": ""
+  },
+  "platform_whitelist": {
+    "description": "允许响应的平台 ID，逗号分隔；留空表示不限制。NapCat/OneBot v11 是 aiocqhttp，QQ 官方机器人是 qq_official",
     "type": "string",
     "default": ""
   },
