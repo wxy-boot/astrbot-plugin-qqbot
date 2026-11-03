@@ -3,7 +3,7 @@
 统一封装三类接口，命令处理器不直接使用 aiohttp：
 
 - Sub2API 管理 API：登录、精确搜索用户、查询单个用户；
-- 签到服务的机器人接口：``/api/bot/checkin``、``/api/bot/status``；
+- 签到服务的机器人接口：``/api/bot/checkin``、``/api/bot/status``、``/api/bot/trial-credit``；
 - 抽奖服务的机器人接口：``/api/bot/draw``、``/api/bot/status``。
 
 异常分层：``UserError`` 可直接展示给用户；``UpstreamError`` 带 HTTP 状态与
@@ -438,6 +438,17 @@ class BotServiceClient:
         return await self._request(
             "POST",
             "/api/bot/draw",
+            body={"userId": str(user_id), "userName": user_name or ""},
+            retry=False,
+        )
+
+    async def trial_credit(
+        self, user_id: str | int, user_name: str = ""
+    ) -> dict[str, Any]:
+        """领取新人测试额度（写请求，不重试）。"""
+        return await self._request(
+            "POST",
+            "/api/bot/trial-credit",
             body={"userId": str(user_id), "userName": user_name or ""},
             retry=False,
         )

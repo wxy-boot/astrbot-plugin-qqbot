@@ -170,7 +170,7 @@ def test_bind_ok_masks_email_and_shows_balance() -> None:
         "✅ 绑定成功\n"
         "账号：a***e@example.com\n"
         "余额：5.20 USD\n"
-        "可用命令：/签到 /抽奖 /查询 /解绑 /帮助"
+        "可用命令：/签到 /抽奖 /领测试额度 /查询 /解绑 /帮助"
     )
     assert text == expected
 
@@ -184,6 +184,32 @@ def test_unbind_ok() -> None:
     text = fmt.unbind_ok(email="alice@example.com", masked=True)
     assert text.startswith("✅ 已解绑 a***e@example.com")
     assert "历史签到/抽奖记录仍在服务端" in text
+
+
+def test_trial_ok_with_and_without_balance() -> None:
+    entry = {"amount": 1, "unit": "USD", "rewardLabel": "测试额度"}
+    assert fmt.trial_ok(entry, "USD") == "✅ 领取成功，+1.00 USD 测试额度已到账"
+    assert fmt.trial_ok(entry, "USD", 6.2) == (
+        "✅ 领取成功，+1.00 USD 测试额度已到账\n当前余额：6.20 USD"
+    )
+    # 金额为 0 或缺失时也要能显示，不能抛异常
+    assert fmt.trial_ok({}, "USD") == "✅ 领取成功，+0.00 USD 测试额度已到账"
+    assert fmt.trial_ok(None, "USD") == "✅ 领取成功，+0.00 USD 测试额度已到账"
+
+
+def test_trial_window_expired_texts() -> None:
+    with_numbers = fmt.trial_window_expired(
+        {"allowedDays": 3, "registeredDays": 10.2}, "USD"
+    )
+    assert with_numbers == (
+        "账号注册已 10.20 天，超过可领取范围（注册 3.00 天内），无法领取测试额度"
+    )
+
+    only_allowed = fmt.trial_window_expired({"allowedDays": 3}, "USD")
+    assert only_allowed == "账号注册超过 3.00 天，无法领取测试额度"
+
+    fallback = fmt.trial_window_expired(None, "USD")
+    assert fallback == "账号注册时间超过可领取范围，无法领取测试额度"
 
 
 def test_cooldown_text() -> None:
@@ -265,5 +291,5 @@ def test_quota_line_variants() -> None:
 
 
 def test_help_text_lists_all_commands() -> None:
-    for command in ("/绑定", "/签到", "/抽奖", "/查询", "/解绑", "/帮助"):
+    for command in ("/绑定", "/签到", "/抽奖", "/领测试额度", "/查询", "/解绑", "/帮助"):
         assert command in fmt.MSG_HELP

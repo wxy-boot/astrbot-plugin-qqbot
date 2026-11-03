@@ -27,6 +27,7 @@ MSG_HELP = """📖 Sub2API QQ 助手
 /绑定 邮箱   绑定站点账号（一个 QQ 一个账号）
 /签到        每日签到
 /抽奖        当日消费达标后抽奖
+/领测试额度  领取新人测试额度（仅注册初期，一个账号一次）
 /查询        查看余额、签到、抽奖、消费
 /解绑        解除当前绑定
 /帮助        显示本帮助"""
@@ -57,6 +58,16 @@ MSG_DRAW_THRESHOLD_FAILED = "抽奖门槛校验失败，请联系管理员检查
 MSG_CHECKIN_ALREADY = "今天已经签到过了，明天再来~"
 MSG_CHECKIN_UNAVAILABLE = "签到服务暂时不可用，请稍后再试；可先用 /查询 确认结果"
 MSG_DRAW_UNAVAILABLE = "抽奖服务暂时不可用，请稍后再试；可先用 /查询 确认结果"
+MSG_TRIAL_ALREADY = "你已经领过测试额度了，每个账号限领一次"
+MSG_TRIAL_DISABLED = "测试额度活动暂未开启，请联系管理员"
+MSG_TRIAL_AUTH = "测试额度服务未配置或密钥错误，请联系管理员"
+MSG_TRIAL_NOT_DEPLOYED = "签到服务还没有提供测试额度接口，请升级签到服务或联系管理员"
+MSG_TRIAL_REGISTRATION_UNKNOWN = (
+    "无法确认账号注册时间，暂时不能领取测试额度，请联系管理员"
+)
+MSG_TRIAL_UNAVAILABLE = (
+    "测试额度服务暂时不可用，请稍后再试；超时也可能已经到账，可先用 /查询 确认余额"
+)
 MSG_COOLDOWN = "操作太频繁，请 {seconds} 秒后再试"
 MSG_SERVICE_UNCONFIGURED = "未配置"
 MSG_QUERY_FAILED = "查询失败"
@@ -205,7 +216,7 @@ def bind_ok(*, email: str, balance: Any, unit: str, masked: bool) -> str:
         "✅ 绑定成功\n"
         f"账号：{display_email(email, masked=masked)}\n"
         f"余额：{balance_text}\n"
-        "可用命令：/签到 /抽奖 /查询 /解绑 /帮助"
+        "可用命令：/签到 /抽奖 /领测试额度 /查询 /解绑 /帮助"
     )
 
 
@@ -283,6 +294,43 @@ def draw_already(prize: Any, unit: str, draw: Any = None) -> str:
     if gained is not None and gained > 0:
         return f"今天已经抽过了：{money(gained, unit)}（{label}）"
     return f"今天已经抽过了：「{label}」，本次没有余额奖励"
+
+
+# ------------------------------------------------------------------ /领测试额度
+
+
+def trial_ok(entry: Any, unit: str, balance: Any = None) -> str:
+    """领取成功：金额与单位以签到服务返回为准，余额可选。"""
+    data = entry if isinstance(entry, dict) else {}
+    entry_unit = data.get("unit") or unit
+    text = f"✅ 领取成功，+{money(data.get('amount'), entry_unit)} 测试额度已到账"
+    if balance is not None:
+        text = f"{text}\n当前余额：{money(balance, unit)}"
+    return text
+
+
+def trial_window_expired(eligibility: Any, unit: str = "") -> str:
+    """注册时间超过允许天数时的提示，尽量带上服务返回的天数。"""
+    data = eligibility if isinstance(eligibility, dict) else {}
+    allowed = data.get("allowedDays")
+    registered = data.get("registeredDays")
+
+    def _days(value: Any) -> str:
+        number = to_decimal(value)
+        if number is None:
+            return ""
+        return amount(number)
+
+    allowed_text = _days(allowed)
+    registered_text = _days(registered)
+    if allowed_text and registered_text:
+        return (
+            f"账号注册已 {registered_text} 天，超过可领取范围"
+            f"（注册 {allowed_text} 天内），无法领取测试额度"
+        )
+    if allowed_text:
+        return f"账号注册超过 {allowed_text} 天，无法领取测试额度"
+    return "账号注册时间超过可领取范围，无法领取测试额度"
 
 
 # ------------------------------------------------------------------ /查询 卡片
@@ -402,5 +450,7 @@ __all__ = [
     "status_header",
     "threshold_line",
     "to_decimal",
+    "trial_ok",
+    "trial_window_expired",
     "unbind_ok",
 ]

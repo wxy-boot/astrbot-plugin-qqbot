@@ -18,6 +18,7 @@ from aiohttp import web  # noqa: E402
 from helpers import BASE_CONFIG  # noqa: E402
 
 import main  # noqa: E402
+from qbot import formatting as fmt  # noqa: E402
 from qbot.app import BotService  # noqa: E402
 from qbot.state import BindingStore  # noqa: E402
 
@@ -61,6 +62,14 @@ class MockBackend:
             "eligible": True,
         }
         self.requests: list[str] = []
+        # 领测试额度（挂在签到服务上）
+        self.trial_config: dict[str, Any] = {
+            "enabled": True,
+            "amount": 1,
+            "allowedDays": 3,
+        }
+        self.trial_window_expired = False
+        self.trial_entries: dict[str, dict[str, Any]] = {}
 
     # ------------------------------------------------------------ Sub2API
 
@@ -178,6 +187,90 @@ class MockBackend:
             }
         )
 
+    # ------------------------------------------------------------ 测试额度
+
+    async def trial_credit(self, request: web.Request) -> web.Response:
+        self.requests.append("trial_credit")
+        error = self._check_secret(request)
+        if error is not None:
+            return error
+        body = await request.json()
+        uid = str(body.get("userId"))
+        if uid not in self.users:
+            return web.json_response(
+                {"ok": False, "error": "user_not_found", "message": "用户不存在"},
+                status=404,
+            )
+        trial = self.trial_config
+        eligibility = {
+            "enabled": trial["enabled"],
+            "eligible": False,
+            "amount": trial["amount"],
+            "unit": "USD",
+            "allowedDays": trial["allowedDays"],
+            "registeredDays": 1.0,
+            "reason": "",
+            "message": "",
+        }
+        if not trial["enabled"]:
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error": "trial_credit_disabled",
+                    "message": "测试额度活动未开启。",
+                    "eligibility": {**eligibility, "reason": "trial_credit_disabled"},
+                },
+                status=403,
+            )
+        entry = self.trial_entries.get(uid)
+        if entry is not None:
+            return web.json_response(
+                {
+                    "ok": True,
+                    "alreadyClaimed": True,
+                    "unit": "USD",
+                    "entry": entry,
+                    "eligibility": {**eligibility, "claimed": True, "reason": "already_claimed"},
+                    "balance": self.users[uid]["balance"],
+                }
+            )
+        if self.trial_window_expired:
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error": "trial_window_expired",
+                    "message": "账号注册超过 3 天，无法领取测试额度。",
+                    "eligibility": {
+                        **eligibility,
+                        "registeredDays": 10.2,
+                        "reason": "registration_window_expired",
+                    },
+                },
+                status=403,
+            )
+        entry = {
+            "date": "2026-11-01",
+            "amount": trial["amount"],
+            "unit": "USD",
+            "rewardLabel": "测试额度",
+            "note": "Trial credit 2026-11-01",
+            "createdAt": "2026-11-03T02:00:00.000Z",
+        }
+        self.trial_entries[uid] = entry
+        self.users[uid]["balance"] = round(
+            float(self.users[uid]["balance"]) + float(trial["amount"]), 2
+        )
+        return web.json_response(
+            {
+                "ok": True,
+                "alreadyClaimed": False,
+                "unit": "USD",
+                "entry": entry,
+                "eligibility": {**eligibility, "eligible": True, "claimed": True},
+                "balance": self.users[uid]["balance"],
+            }
+        )
+
     # ------------------------------------------------------------ 抽奖服务
 
     async def draw(self, request: web.Request) -> web.Response:
@@ -273,6 +366,7 @@ async def backend() -> Any:
     app.router.add_get("/api/v1/admin/users/{uid}", backend.get_user)
     app.router.add_post("/checkin/api/bot/checkin", backend.checkin)
     app.router.add_get("/checkin/api/bot/status", backend.checkin_status)
+    app.router.add_post("/checkin/api/bot/trial-credit", backend.trial_credit)
     app.router.add_post("/choujiang/api/bot/draw", backend.draw)
     app.router.add_get("/choujiang/api/bot/status", backend.draw_status)
 
@@ -304,6 +398,7 @@ def make_plugin(tmp_path: Path, base_url: str) -> main.Sub2ApiQqBotPlugin:
         plugin.sub2api,
         plugin.qiandao,
         plugin.choujiang,
+        plugin.trial,
     )
     return plugin
 
@@ -499,4 +594,54 @@ async def test_bad_secret_is_reported(backend: MockBackend, tmp_path: Path) -> N
 
     reply = await run(plugin.cmd_checkin, "签到")
     assert "密钥错误" in reply
+    await plugin.terminate()
+
+
+# ---------------------------------------------------------------- /领测试额度
+
+
+async def test_trial_credit_flow(backend: MockBackend, tmp_path: Path) -> None:
+    """首次领取 +1 USD，第二次同一账号不再发放，余额只加一次。"""
+    plugin = make_plugin(tmp_path, backend.base_url)
+    await plugin.store.load()
+    await run(plugin.cmd_bind, "绑定 alice@example.com")
+
+    reply = await run(plugin.cmd_trial_credit, "领测试额度")
+    assert reply == "✅ 领取成功，+1.00 USD 测试额度已到账\n当前余额：6.20 USD"
+    assert backend.users[UID]["balance"] == 6.2
+
+    reply = await run(plugin.cmd_trial_credit, "领测试额度")
+    assert reply == fmt.MSG_TRIAL_ALREADY
+    assert backend.users[UID]["balance"] == 6.2, "重复领取不能再加余额"
+
+    reply = await run(plugin.cmd_status, "查询")
+    assert "余额：6.20 USD" in reply
+    await plugin.terminate()
+
+
+async def test_trial_credit_rejects_expired_account(
+    backend: MockBackend, tmp_path: Path
+) -> None:
+    plugin = make_plugin(tmp_path, backend.base_url)
+    await plugin.store.load()
+    await run(plugin.cmd_bind, "绑定 alice@example.com")
+
+    backend.trial_window_expired = True
+    reply = await run(plugin.cmd_trial_credit, "领测试额度")
+
+    assert "超过可领取范围" in reply
+    assert backend.users[UID]["balance"] == 5.2, "超期不能发放余额"
+    await plugin.terminate()
+
+
+async def test_trial_credit_disabled_by_backend(
+    backend: MockBackend, tmp_path: Path
+) -> None:
+    plugin = make_plugin(tmp_path, backend.base_url)
+    await plugin.store.load()
+    await run(plugin.cmd_bind, "绑定 alice@example.com")
+
+    backend.trial_config["enabled"] = False
+    reply = await run(plugin.cmd_trial_credit, "领测试额度")
+    assert reply == fmt.MSG_TRIAL_DISABLED
     await plugin.terminate()

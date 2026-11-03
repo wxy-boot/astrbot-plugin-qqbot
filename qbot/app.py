@@ -1,8 +1,8 @@
-"""命令业务逻辑：``/绑定`` ``/签到`` ``/抽奖`` ``/查询`` ``/解绑``。
+"""命令业务逻辑：``/绑定`` ``/签到`` ``/抽奖`` ``/领测试额度`` ``/查询`` ``/解绑``。
 
 这一层不依赖 AstrBot：输入是 QQ 号与消息文本，输出是回复文本，便于单元测试。
-签到/抽奖的资格判断完全交给上游服务，插件只解释返回的 ``eligibility``，
-不保存、不推断、不缓存消费门槛。
+签到/抽奖/测试额度的资格判断完全交给上游服务，插件只解释返回的 ``eligibility``，
+不保存、不推断、不缓存消费门槛与领取条件。
 """
 
 from __future__ import annotations
@@ -93,12 +93,15 @@ class BotService:
         sub2api: Sub2ApiClient,
         qiandao: BotServiceClient,
         choujiang: BotServiceClient,
+        trial: BotServiceClient | None = None,
     ) -> None:
         self.config = config
         self.store = store
         self.sub2api = sub2api
         self.qiandao = qiandao
         self.choujiang = choujiang
+        # 测试额度复用签到服务的地址与密钥，但单独一个客户端便于日志区分
+        self.trial = trial if trial is not None else qiandao
 
     # ---------------------------------------------------------------- /帮助
 
@@ -215,6 +218,35 @@ class BotService:
             # 服务返回 200 但没有实际抽取记录：门槛未达标或无法校验时不允许放行
             self._guard_eligibility(payload.get("eligibility"), kind="draw")
         return fmt.draw_ok(payload.get("prize"), unit, payload.get("draw"))
+
+    # ---------------------------------------------------------------- /领测试额度
+
+    async def trial_credit(self, qq: str) -> str:
+        """领取新人测试额度：注册天数窗口与领取次数都由签到服务判定。"""
+        self._ensure_available()
+        binding = await self._require_binding(qq)
+        if not self.config.qiandao_secret:
+            raise UserError(fmt.MSG_BOT_SECRET_MISSING)
+        try:
+            payload = await self.trial.trial_credit(binding.uid, binding.name)
+        except ServiceNotConfigured as exc:
+            raise UserError(fmt.MSG_BOT_SECRET_MISSING) from exc
+        except (NetworkError, UpstreamTimeout) as exc:
+            logger.warning("测试额度服务不可用：%s", exc)
+            raise UserError(fmt.MSG_TRIAL_UNAVAILABLE) from exc
+        except UpstreamError as exc:
+            logger.warning("领取测试额度失败：status=%s code=%s", exc.status, exc.code)
+            raise UserError(self._trial_error_text(exc)) from exc
+
+        unit = str(payload.get("unit") or self.config.currency_unit)
+        if payload.get("alreadyClaimed"):
+            return fmt.MSG_TRIAL_ALREADY
+        entry = payload.get("entry")
+        if not isinstance(entry, dict) or not entry:
+            # 服务返回 200 但没有领取记录：既没说明已领过，也没给出金额，绝不静默算成功
+            logger.warning("测试额度响应缺少 entry：%s", payload.get("eligibility"))
+            raise UserError(fmt.MSG_UPSTREAM_ERROR)
+        return fmt.trial_ok(entry, unit, payload.get("balance"))
 
     # ---------------------------------------------------------------- /查询
 
@@ -346,6 +378,37 @@ class BotService:
                 if kind == "checkin"
                 else fmt.MSG_DRAW_THRESHOLD_FAILED
             )
+
+    def _trial_error_text(self, exc: UpstreamError) -> str:
+        """把测试额度接口的错误翻译成用户可读文案。"""
+        status = exc.status or 0
+        code = (exc.code or "").strip().lower()
+        payload = exc.payload if isinstance(exc.payload, dict) else {}
+        eligibility = payload.get("eligibility")
+
+        if code == "trial_credit_disabled":
+            return fmt.MSG_TRIAL_DISABLED
+        if code == "trial_window_expired":
+            return fmt.trial_window_expired(eligibility, self.config.currency_unit)
+        if code == "registration_time_unavailable":
+            return fmt.MSG_TRIAL_REGISTRATION_UNKNOWN
+        if code == "user_not_found":
+            return fmt.MSG_USER_GONE
+        if status == 404:
+            # 签到服务是旧版本，没有 /api/bot/trial-credit
+            return fmt.MSG_TRIAL_NOT_DEPLOYED
+        if status in (401, 403) or code in {"invalid_bot_secret", "bot_disabled"}:
+            return fmt.MSG_TRIAL_AUTH
+        if status == 405 or code == "method_not_allowed":
+            return fmt.MSG_TRIAL_NOT_DEPLOYED
+        if status == 423 or code == "compliance_required":
+            return fmt.MSG_COMPLIANCE
+        if status == 504 or code == "upstream_timeout":
+            return fmt.MSG_TIMEOUT_UPSTREAM
+        if status >= 500 or code in {"upstream_error", "internal_error"}:
+            return fmt.MSG_TRIAL_UNAVAILABLE
+        message = fmt.sanitize(exc.message)
+        return message or fmt.MSG_UPSTREAM_ERROR
 
     def _bot_error_text(self, exc: UpstreamError, *, label: str, kind: str) -> str:
         """把上游错误翻译成用户可读文案。"""

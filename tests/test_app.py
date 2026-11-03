@@ -102,7 +102,7 @@ async def test_bind_success_masks_email_in_group(tmp_path: Path) -> None:
         "✅ 绑定成功\n"
         "账号：a***e@example.com\n"
         "余额：5.20 USD\n"
-        "可用命令：/签到 /抽奖 /查询 /解绑 /帮助"
+        "可用命令：/签到 /抽奖 /领测试额度 /查询 /解绑 /帮助"
     )
     stored = await store.get(QQ)
     assert stored is not None
@@ -566,6 +566,216 @@ async def test_draw_network_failure(tmp_path: Path) -> None:
     with pytest.raises(UserError) as excinfo:
         await service.draw(QQ)
     assert str(excinfo.value) == fmt.MSG_DRAW_UNAVAILABLE
+
+
+# ---------------------------------------------------------------- /领测试额度
+
+
+async def test_trial_credit_unbound(tmp_path: Path) -> None:
+    service, _, _ = await prepared(tmp_path, FakeTransport([]))
+    with pytest.raises(UserError, match="/绑定"):
+        await service.trial_credit(QQ)
+
+
+async def test_trial_credit_missing_secret(tmp_path: Path) -> None:
+    service, store, _ = await prepared(
+        tmp_path, FakeTransport([]), bot_shared_secret=""
+    )
+    await store.bind(QQ, binding())
+    with pytest.raises(UserError, match="未配置机器人密钥"):
+        await service.trial_credit(QQ)
+
+
+async def test_trial_credit_success(tmp_path: Path) -> None:
+    payload = {
+        "ok": True,
+        "alreadyClaimed": False,
+        "unit": "USD",
+        "entry": {
+            "amount": 1,
+            "unit": "USD",
+            "rewardLabel": "测试额度",
+            "createdAt": "2026-11-03T00:12:00.000Z",
+        },
+        "eligibility": {
+            "enabled": True,
+            "eligible": True,
+            "claimed": True,
+            "amount": 1,
+            "allowedDays": 3,
+            "registeredDays": 0.9,
+        },
+        "balance": 6.2,
+    }
+    transport = FakeTransport([json_result(payload)])
+    service, store, _ = await prepared(tmp_path, transport)
+    await store.bind(QQ, binding())
+
+    reply = await service.trial_credit(QQ)
+
+    assert reply == "✅ 领取成功，+1.00 USD 测试额度已到账\n当前余额：6.20 USD"
+    call = transport.calls[0]
+    assert call.method == "POST"
+    assert call.url == "http://qiandao:8787/checkin/api/bot/trial-credit"
+    assert call.headers["X-Bot-Secret"] == "0123456789abcdef0123456789"
+    assert call.json_body == {"userId": "42", "userName": "alice"}
+
+
+async def test_trial_credit_without_balance(tmp_path: Path) -> None:
+    payload = {
+        "ok": True,
+        "alreadyClaimed": False,
+        "unit": "USD",
+        "entry": {"amount": 1, "unit": "USD"},
+        "balance": None,
+    }
+    service, store, _ = await prepared(tmp_path, FakeTransport([json_result(payload)]))
+    await store.bind(QQ, binding())
+
+    assert await service.trial_credit(QQ) == "✅ 领取成功，+1.00 USD 测试额度已到账"
+
+
+async def test_trial_credit_already_claimed(tmp_path: Path) -> None:
+    payload = {
+        "ok": True,
+        "alreadyClaimed": True,
+        "entry": {"amount": 1, "unit": "USD"},
+        "eligibility": {"enabled": True, "reason": "already_claimed"},
+    }
+    service, store, _ = await prepared(tmp_path, FakeTransport([json_result(payload)]))
+    await store.bind(QQ, binding())
+    assert await service.trial_credit(QQ) == fmt.MSG_TRIAL_ALREADY
+
+
+async def test_trial_credit_disabled(tmp_path: Path) -> None:
+    payload = {
+        "ok": False,
+        "error": "trial_credit_disabled",
+        "message": "测试额度活动未开启。",
+        "eligibility": {"enabled": False, "eligible": False},
+    }
+    service, store, _ = await prepared(
+        tmp_path, FakeTransport([json_result(payload, status=403)])
+    )
+    await store.bind(QQ, binding())
+    with pytest.raises(UserError) as excinfo:
+        await service.trial_credit(QQ)
+    assert str(excinfo.value) == fmt.MSG_TRIAL_DISABLED
+
+
+async def test_trial_credit_window_expired(tmp_path: Path) -> None:
+    payload = {
+        "ok": False,
+        "error": "trial_window_expired",
+        "message": "账号注册已超过 3 天，无法领取测试额度。",
+        "eligibility": {
+            "enabled": True,
+            "eligible": False,
+            "allowedDays": 3,
+            "registeredDays": 10.2,
+            "reason": "registration_window_expired",
+        },
+    }
+    service, store, _ = await prepared(
+        tmp_path, FakeTransport([json_result(payload, status=403)])
+    )
+    await store.bind(QQ, binding())
+    with pytest.raises(UserError) as excinfo:
+        await service.trial_credit(QQ)
+    assert str(excinfo.value) == (
+        "账号注册已 10.20 天，超过可领取范围（注册 3.00 天内），无法领取测试额度"
+    )
+
+
+async def test_trial_credit_window_expired_without_numbers(tmp_path: Path) -> None:
+    payload = {
+        "ok": False,
+        "error": "trial_window_expired",
+        "eligibility": {"enabled": True, "eligible": False},
+    }
+    service, store, _ = await prepared(
+        tmp_path, FakeTransport([json_result(payload, status=403)])
+    )
+    await store.bind(QQ, binding())
+    with pytest.raises(UserError) as excinfo:
+        await service.trial_credit(QQ)
+    assert "无法领取测试额度" in str(excinfo.value)
+
+
+async def test_trial_credit_registration_unknown(tmp_path: Path) -> None:
+    payload = {
+        "ok": False,
+        "error": "registration_time_unavailable",
+        "eligibility": {"enabled": True, "reason": "registration_time_unavailable"},
+    }
+    service, store, _ = await prepared(
+        tmp_path, FakeTransport([json_result(payload, status=502)])
+    )
+    await store.bind(QQ, binding())
+    with pytest.raises(UserError) as excinfo:
+        await service.trial_credit(QQ)
+    assert str(excinfo.value) == fmt.MSG_TRIAL_REGISTRATION_UNKNOWN
+
+
+async def test_trial_credit_endpoint_not_deployed(tmp_path: Path) -> None:
+    """旧版签到服务没有这个接口时会返回 404 not_found，不能误报“账号已不存在”。"""
+    payload = {"ok": False, "error": "not_found"}
+    service, store, _ = await prepared(
+        tmp_path, FakeTransport([json_result(payload, status=404)])
+    )
+    await store.bind(QQ, binding())
+    with pytest.raises(UserError) as excinfo:
+        await service.trial_credit(QQ)
+    assert str(excinfo.value) == fmt.MSG_TRIAL_NOT_DEPLOYED
+
+
+async def test_trial_credit_user_gone(tmp_path: Path) -> None:
+    payload = {"ok": False, "error": "user_not_found"}
+    service, store, _ = await prepared(
+        tmp_path, FakeTransport([json_result(payload, status=404)])
+    )
+    await store.bind(QQ, binding())
+    with pytest.raises(UserError) as excinfo:
+        await service.trial_credit(QQ)
+    assert str(excinfo.value) == fmt.MSG_USER_GONE
+
+
+async def test_trial_credit_invalid_secret(tmp_path: Path) -> None:
+    payload = {"ok": False, "error": "invalid_bot_secret"}
+    service, store, _ = await prepared(
+        tmp_path, FakeTransport([json_result(payload, status=401)])
+    )
+    await store.bind(QQ, binding())
+    with pytest.raises(UserError) as excinfo:
+        await service.trial_credit(QQ)
+    assert str(excinfo.value) == fmt.MSG_TRIAL_AUTH
+
+
+async def test_trial_credit_network_failure(tmp_path: Path) -> None:
+    service, store, _ = await prepared(
+        tmp_path, FakeTransport([NetworkError("boom")])
+    )
+    await store.bind(QQ, binding())
+    with pytest.raises(UserError) as excinfo:
+        await service.trial_credit(QQ)
+    assert str(excinfo.value) == fmt.MSG_TRIAL_UNAVAILABLE
+
+
+async def test_trial_credit_never_reports_success_without_entry(tmp_path: Path) -> None:
+    payload = {"ok": True, "alreadyClaimed": False, "entry": None, "balance": None}
+    service, store, _ = await prepared(tmp_path, FakeTransport([json_result(payload)]))
+    await store.bind(QQ, binding())
+    with pytest.raises(UserError) as excinfo:
+        await service.trial_credit(QQ)
+    assert str(excinfo.value) == fmt.MSG_UPSTREAM_ERROR
+
+
+async def test_trial_credit_read_only_store(tmp_path: Path) -> None:
+    service, store, _ = await prepared(tmp_path, FakeTransport([]))
+    store._read_only_reason = "corrupt"
+    with pytest.raises(UserError) as excinfo:
+        await service.trial_credit(QQ)
+    assert str(excinfo.value) == fmt.MSG_STATE_CORRUPT
 
 
 # ---------------------------------------------------------------- /查询

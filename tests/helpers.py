@@ -165,7 +165,14 @@ def build_service(
         secret=config.choujiang_secret,
         timeout=config.request_timeout,
     )
-    return BotService(config, store, sub2api, qiandao, choujiang), store, config
+    trial = BotServiceClient(
+        transport,
+        label="测试额度服务",
+        base_url=config.qiandao_base_url,
+        secret=config.qiandao_secret,
+        timeout=config.request_timeout,
+    )
+    return BotService(config, store, sub2api, qiandao, choujiang, trial), store, config
 
 
 def user_payload(**overrides: Any) -> dict[str, Any]:

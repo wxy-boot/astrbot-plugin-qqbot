@@ -1,6 +1,6 @@
 name: astrbot_plugin_sub2api_qqbot
 display_name: Sub2API QQ 助手
-desc: Sub2API 账号绑定、每日签到、消费达标抽奖与状态查询。
-version: v0.1.1
+desc: Sub2API 账号绑定、每日签到、消费达标抽奖、新人测试额度与状态查询。
+version: v0.2.0
 author: wxy-boot
 repo: https://github.com/wxy-boot/astrbot-plugin-qqbot

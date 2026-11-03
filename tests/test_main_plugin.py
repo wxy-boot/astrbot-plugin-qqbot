@@ -108,10 +108,11 @@ def test_handlers_are_registered_with_aliases() -> None:
             if isinstance(event_filter, CommandFilter):
                 found[event_filter.command_name] = set(event_filter.alias)
 
-    assert set(found) == {"绑定", "签到", "抽奖", "查询", "解绑", "帮助"}
+    assert set(found) == {"绑定", "签到", "抽奖", "领测试额度", "查询", "解绑", "帮助"}
     assert found["绑定"] == {"bind"}
     assert found["签到"] == {"checkin", "打卡"}
     assert found["抽奖"] == {"draw", "转盘"}
+    assert found["领测试额度"] == {"领额度", "测试额度", "trial"}
     assert found["查询"] == {"status", "我的"}
     assert found["解绑"] == {"unbind"}
     assert found["帮助"] == {"help"}
@@ -119,7 +120,7 @@ def test_handlers_are_registered_with_aliases() -> None:
 
 def test_plugin_metadata() -> None:
     assert main.PLUGIN_NAME == "astrbot_plugin_sub2api_qqbot"
-    assert main.PLUGIN_VERSION == "v0.1.1"
+    assert main.PLUGIN_VERSION == "v0.2.0"
 
 
 # ---------------------------------------------------------------- /帮助
@@ -313,6 +314,16 @@ async def test_status_reports_missing_binding(tmp_path: Path) -> None:
     event = FakeEvent("查询")
     results = await collect(plugin.cmd_status(event))
     assert results[0].text == fmt.MSG_UNBOUND
+
+
+async def test_unbound_trial_credit_prompts_bind(tmp_path: Path) -> None:
+    plugin = make_plugin(tmp_path)
+    await plugin.store.load()
+
+    event = FakeEvent("领测试额度")
+    results = await collect(plugin.cmd_trial_credit(event))
+    assert results[0].text == fmt.MSG_UNBOUND
+    assert event.stopped is True
 
 
 async def test_unbind_without_binding(tmp_path: Path) -> None:

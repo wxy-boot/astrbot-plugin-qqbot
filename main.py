@@ -1,6 +1,6 @@
 """Sub2API QQ 助手 —— AstrBot 插件入口。
 
-命令：``/绑定`` ``/签到`` ``/抽奖`` ``/查询`` ``/解绑`` ``/帮助``。
+命令：``/绑定`` ``/签到`` ``/抽奖`` ``/领测试额度`` ``/查询`` ``/解绑`` ``/帮助``。
 业务逻辑在 ``qbot`` 包内（不依赖 AstrBot），本文件只做适配：
 平台/群白名单过滤、命令冷却、异常兜底与消息回复。
 """
@@ -32,8 +32,8 @@ except ImportError:  # pragma: no cover - 在插件目录内直接 import main �
 
 PLUGIN_NAME = "astrbot_plugin_sub2api_qqbot"
 PLUGIN_AUTHOR = "wxy-boot"
-PLUGIN_DESC = "Sub2API 账号绑定、每日签到、消费达标抽奖与状态查询。"
-PLUGIN_VERSION = "v0.1.1"
+PLUGIN_DESC = "Sub2API 账号绑定、每日签到、消费达标抽奖、新人测试额度与状态查询。"
+PLUGIN_VERSION = "v0.2.0"
 PLUGIN_REPO = "https://github.com/wxy-boot/astrbot-plugin-qqbot"
 
 PLATFORM_NAME = "aiocqhttp"
@@ -47,6 +47,7 @@ PLATFORM_NAME = "aiocqhttp"
 CMD_BIND = ("绑定", "bind")
 CMD_CHECKIN = ("签到", "checkin", "打卡")
 CMD_DRAW = ("抽奖", "draw", "转盘")
+CMD_TRIAL = ("领测试额度", "领额度", "测试额度", "trial")
 CMD_STATUS = ("查询", "status", "我的")
 CMD_UNBIND = ("解绑", "unbind")
 
@@ -83,12 +84,21 @@ class Sub2ApiQqBotPlugin(Star):
             secret=self.config.choujiang_secret,
             timeout=self.config.request_timeout,
         )
+        # 测试额度接口挂在签到服务上，用同一份地址与密钥
+        self.trial = qbot_client.BotServiceClient(
+            self.transport,
+            label="测试额度服务",
+            base_url=self.config.qiandao_base_url,
+            secret=self.config.qiandao_secret,
+            timeout=self.config.request_timeout,
+        )
         self.service = qbot_app.BotService(
             self.config,
             self.store,
             self.sub2api,
             self.qiandao,
             self.choujiang,
+            self.trial,
         )
         self.cooldown = qbot_ratelimit.CommandCooldown(
             self.config.command_cooldown_seconds
@@ -178,6 +188,21 @@ class Sub2ApiQqBotPlugin(Star):
             return
         qq = self._sender_id(event)
         reply = await self._run(lambda: self.service.draw(qq))
+        yield event.plain_result(reply)
+        event.stop_event()
+
+    @filter.command("领测试额度", alias={"领额度", "测试额度", "trial"})
+    async def cmd_trial_credit(self, event: AstrMessageEvent):
+        """领取新人测试额度：/领测试额度"""
+        if not self._should_handle(event, "领测试额度"):
+            return
+        wait = self._cooldown_wait(event)
+        if wait:
+            yield event.plain_result(fmt.cooldown_text(wait))
+            event.stop_event()
+            return
+        qq = self._sender_id(event)
+        reply = await self._run(lambda: self.service.trial_credit(qq))
         yield event.plain_result(reply)
         event.stop_event()
 
